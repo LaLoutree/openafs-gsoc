@@ -44,6 +44,7 @@
 #define MAXNAME 100
 #define MAXINSIZE 1300		/* pioctl complains if data is larger than this */
 #define VMSGSIZE 128		/* size of msg buf in volume hdr */
+#define VIOC_LISTSYMLINK		0x24
 
 static char space[AFS_PIOCTL_MAXSIZE];
 static char tspace[1024];
@@ -1843,6 +1844,129 @@ out:
     return -1;
 }
 
+static int
+ComponentInfo(char *component) {
+	struct stat s;
+    struct ViceIoctl blob;
+    char *parent_dir;
+    char *last_comp;
+	int thru_symlink = 0;
+    afs_int32 code;
+
+	if (lstat(component, &s) == -1) {
+        if (errno == ENOENT)
+            printf("'%s' does not exist\n", component);
+        else
+            printf("'%s' lstat failed\n", component);
+        return 1;
+    }
+
+	if (GetLastComponent(component, &parent_dir,
+			     &last_comp, &thru_symlink, 0) != 0) {
+		printf("GetLastComponent failed\n");
+	    return 1;
+	}
+
+	if (S_ISLNK(s.st_mode)) {
+		char target[PATH_MAX];
+        ssize_t len = readlink(component, target, sizeof(target) - 1);
+		target[len] = '\0';
+		
+		blob.in = last_comp;
+		blob.in_size = strlen(last_comp) + 1;
+		blob.out_size = AFS_PIOCTL_MAXSIZE;
+		blob.out = space;
+		memset(space, 0, AFS_PIOCTL_MAXSIZE);
+		code = pioctl(parent_dir, VIOC_LISTSYMLINK, &blob, 0);
+
+	    printf("'%s' is an %ssymbolic link, leading to ", component, (code != 0 ? "AFS " : ""));
+        ComponentInfo(target);
+
+	}  else if (S_ISDIR(s.st_mode)) {
+		blob.in = last_comp;
+		blob.in_size = strlen(last_comp) + 1;
+		blob.out_size = AFS_PIOCTL_MAXSIZE;
+		blob.out = space;
+        memset(space, 0, AFS_PIOCTL_MAXSIZE);
+        code = pioctl(parent_dir, VIOC_AFS_STAT_MT_PT, &blob, 0);
+		
+        if (code == 0) {
+            printf("'%s' is a mount point, for volume '%s'\n",
+                   component, space);
+        } else {
+            printf("'%s' is a directory\n", component);
+        }
+
+    } else if (S_ISREG(s.st_mode)) {
+        printf("'%s' is a regular file\n", component);
+
+    } else {
+        printf("'%s' is a special file\n", component);
+    }
+
+	return 0;
+}
+
+static int
+PathInfoCmd(struct cmd_syndesc *as, void *arock)
+{
+    struct cmd_item *ti;
+    int error = 0;
+    const char *cursor;
+    const char *slash;
+    char component[PATH_MAX];
+    char fullpath[PATH_MAX * 2 + 1];
+    int idx = 0;
+
+    if (as->parms[0].items->next) {
+        idx = 1;
+    }
+
+    for (ti = as->parms[0].items; ti; ti = ti->next) {
+
+        if (ti->data[0] != '/') {
+            char cwd[PATH_MAX];
+            getcwd(cwd, sizeof(cwd));
+            int len = snprintf(fullpath, sizeof(fullpath), "%s/%s", cwd, ti->data);
+			
+			if (len < 0 || (size_t)len >= sizeof(fullpath)) {
+				fprintf(stderr, "Path too long\n");
+				continue;
+			}
+
+			cursor = fullpath + strlen(cwd);
+        } else {
+            strncpy(fullpath, ti->data, sizeof(fullpath) - 1);
+            fullpath[sizeof(fullpath) - 1] = '\0';
+			cursor = fullpath + 1;
+        }
+
+        if (idx) {
+            printf("===== Path %d =====\n\n", idx);
+        }
+
+        while (*cursor && !error) {
+            slash = strchr(cursor, '/');
+            if (slash) {
+                strncpy(component, fullpath, slash - fullpath);
+                component[slash - fullpath] = '\0';
+                cursor = slash + 1;
+            } else {
+                strcpy(component, fullpath);
+                cursor += strlen(cursor);
+            }
+
+			error = ComponentInfo(component);
+        }
+
+        if (idx) {
+            printf("\n");
+            idx++;
+        }
+    }
+
+    return 0;
+}
 
 static int
 ListMountCmd(struct cmd_syndesc *as, void *arock)
@@ -3770,6 +3894,9 @@ main(int argc, char **argv)
 
     ts = cmd_CreateSyntax("lsmount", ListMountCmd, NULL, 0, "list mount point");
     cmd_AddParm(ts, "-dir", CMD_LIST, 0, "directory");
+
+	ts = cmd_CreateSyntax("pathinfo", PathInfoCmd, NULL, 0, "display each components' path status");
+	cmd_AddParm(ts, "-path", CMD_LIST, 0, "dir/file path");
 
     ts = cmd_CreateSyntax("mkmount", MakeMountCmd, NULL, 0, "make mount point");
     cmd_AddParm(ts, "-dir", CMD_SINGLE, 0, "directory");
